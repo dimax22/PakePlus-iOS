@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>我的单词书</title>
+  <link rel="stylesheet" href="css/style.css?v=6">
+</head>
+<body class="page-bg">
+
+  <a class="back-link" href="index.html">← 返回主页</a>
+
+  <main class="panel">
+  <h1>我的词库</h1>
+  <div id="tip">初始化中...</div>
+
+  <div class="input-row">
+    <input id="eng" type="text" placeholder="ENG 英文">
+    <input id="chi" type="text" placeholder="CHI 中文释义">
+    <button id="btnAdd" class="btn-add">插入</button>
+    <button id="btnRefresh" class="btn-normal">刷新列表</button>
+    <button id="btnExport" class="btn-normal">导出 vocab.db</button>
+    <input type="file" id="btnImport" accept=".db,.sqlite">
+  </div>
+
+  <div id="list"></div>
+  </main>
+
+  <script src="./sql-wasm.js"></script>
+  <script src="js/db.js"></script>
+  <script>
+    let editingId = null;   // 正在编辑的行 ID
+    const tipDom = document.getElementById('tip');
+    const listDom = document.getElementById('list');
+    const db = () => AppDB.db;
+
+    // ===== 初始化 =====
+    (async function init(){
+      try {
+        await AppDB.init();
+        tipDom.innerText = '初始化成功，数据已持久化';
+        renderTable();
+      } catch (e) {
+        tipDom.innerText = '初始化失败：' + e.message;
+        tipDom.classList.add('tip-error');
+        console.error(e);
+      }
+    })();
+
+    // ===== 新增 =====
+    document.getElementById('btnAdd').onclick = async () => {
+      const engVal = document.getElementById('eng').value.trim();
+      const chiVal = document.getElementById('chi').value.trim();
+      if (!engVal || !chiVal) return;
+      db().run('INSERT INTO vocab(ENG,CHI,CREATE_TIME) VALUES (?,?,?)',
+        [engVal, chiVal, new Date().toLocaleString()]);
+      await AppDB.persist();
+      renderTable();
+    };
+
+    // ===== 删除（先确认） =====
+    window.delRow = async function (id) {
+      if (!confirm('确定删除这条单词吗？')) return;
+      db().run('DELETE FROM vocab WHERE ID=?', [id]);
+      if (editingId === id) editingId = null;
+      await AppDB.persist();
+      renderTable();
+    };
+
+    // ===== 编辑态 =====
+    window.startEdit = function (id) {
+      editingId = id;
+      renderTable();
+    };
+
+    window.cancelEdit = function () {
+      editingId = null;
+      renderTable();
+    };
+
+    // 保存编辑：按 ID 更新 ENG / CHI，STUDY_TIME、CREATE_TIME 不动
+    window.saveEdit = async function (id) {
+      const engInput = document.getElementById('eng-input-' + id);
+      const chiInput = document.getElementById('chi-input-' + id);
+      const engVal = engInput.value.trim();
+      const chiVal = chiInput.value.trim();
+      if (!engVal || !chiVal) {
+        alert('英文和中文都不能为空');
+        return;
+      }
+      db().run('UPDATE vocab SET ENG=?, CHI=? WHERE ID=?', [engVal, chiVal, id]);
+      editingId = null;
+      await AppDB.persist();
+      renderTable();
+      tipDom.innerText = '已保存修改';
+    };
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // ===== 渲染 =====
+    function renderTable() {
+      const res = db().exec('SELECT * FROM vocab ORDER BY ID ASC');
+      if (!res[0]) {
+        listDom.innerHTML = '<p>暂无单词数据</p>';
+        return;
+      }
+      const rows = res[0].values;
+      let html = `<table>
+        <colgroup>
+          <col style="width:7%"><col style="width:27%"><col style="width:27%">
+          <col style="width:10%"><col style="width:14%"><col style="width:15%">
+        </colgroup>
+        <tr>
+          <th>ID</th><th>ENG</th><th>CHI</th><th>STUDY_TIME</th><th>CREATE_TIME</th><th>操作</th>
+        </tr>`;
+      rows.forEach(r => {
+        const [id, eng, chi, studyTime, createTime] = r;
+        const isEditing = editingId === id;
+
+        const engCell = isEditing
+          ? `<input class="cell-input" id="eng-input-${id}" type="text" value="${escapeHtml(eng)}">`
+          : escapeHtml(eng);
+        const chiCell = isEditing
+          ? `<input class="cell-input" id="chi-input-${id}" type="text" value="${escapeHtml(chi)}">`
+          : escapeHtml(chi);
+
+        const actCell = isEditing
+          ? `<div class="act-row">
+               <button class="btn-save" onclick="saveEdit(${id})">保存</button>
+               <button class="btn-edit" onclick="cancelEdit()">取消</button>
+             </div>`
+          : `<div class="act-row">
+               <button class="btn-edit" onclick="startEdit(${id})">编辑</button>
+               <button class="btn-del" onclick="delRow(${id})">删除</button>
+             </div>`;
+
+        html += `<tr>
+          <td>${id}</td><td>${engCell}</td><td>${chiCell}</td>
+          <td>${studyTime}</td><td>${createTime}</td><td>${actCell}</td>
+        </tr>`;
+      });
+      html += '</table>';
+      listDom.innerHTML = html;
+    }
+
+    document.getElementById('btnRefresh').onclick = renderTable;
+
+    // ===== 导出 =====
+    document.getElementById('btnExport').onclick = () => {
+      const blob = AppDB.exportBlob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'vocab.db';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+
+    // ===== 合并导入：ENG+CHI 匹配上就更新，匹配不上就新增（ID 自增、STUDY_TIME=0、CREATE_TIME 当前时间）=====
+    document.getElementById('btnImport').onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      tipDom.innerText = '导入合并中...';
+      try {
+        const buf = new Uint8Array(await file.arrayBuffer());
+        const importDb = AppDB.openFromBuffer(buf);
+        const importResult = importDb.exec('SELECT ENG,CHI FROM vocab');
+        if (!importResult[0]) {
+          tipDom.innerText = '导入文件内无 vocab 数据';
+          importDb.close();
+          return;
+        }
+        const importRows = importResult[0].values;
+        let updateCount = 0, insertCount = 0;
+
+        importRows.forEach(([eng, chi]) => {
+          const exist = db().exec('SELECT ID FROM vocab WHERE ENG=? AND CHI=?', [eng, chi]);
+          if (exist[0]) {
+            db().run('UPDATE vocab SET ENG=?,CHI=? WHERE ENG=? AND CHI=?', [eng, chi, eng, chi]);
+            updateCount++;
+          } else {
+            db().run('INSERT INTO vocab(ENG,CHI,STUDY_TIME,CREATE_TIME) VALUES (?,?,0,?)',
+              [eng, chi, new Date().toLocaleString()]);
+            insertCount++;
+          }
+        });
+
+        importDb.close();
+        await AppDB.persist();
+        renderTable();
+        tipDom.innerText = `合并完成：新增${insertCount}条，更新${updateCount}条`;
+      } catch (err) {
+        tipDom.innerText = '导入失败：' + err.message;
+        tipDom.classList.add('tip-error');
+        console.error(err);
+      }
+      e.target.value = '';  // 允许重复选择同一个文件
+    };
+  </script>
+</body>
+</html>
