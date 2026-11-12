@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>复习</title>
+  <link rel="stylesheet" href="css/style.css?v=9">
+</head>
+<body class="page-bg review-page">
+
+  <header class="review-header">
+    <a class="back-link" href="index.html">← 返回主页</a>
+    <span class="mode-tag" id="modeTag">中文 → 英文</span>
+  </header>
+
+  <main class="review-main" id="reviewMain">
+    <!-- 第一块：题干 -->
+    <section class="glass-block review-card">
+      <div class="card-label" id="qLabel">中文</div>
+      <div class="card-word" id="qWord">…</div>
+    </section>
+
+    <!-- 第二块：答案（初始隐藏，点评价按钮后出现） -->
+    <section class="glass-block review-card hidden" id="answerCard">
+      <div class="card-label" id="aLabel">英文</div>
+      <div class="card-word answer" id="aWord">…</div>
+    </section>
+
+    <!-- 第三块：三个按钮（未作答时） -->
+    <section class="review-actions" id="rateActions">
+      <button class="act-btn act-know" data-rate="know">认识</button>
+      <button class="act-btn act-vague" data-rate="vague">模糊</button>
+      <button class="act-btn act-forget" data-rate="forget">忘记</button>
+    </section>
+
+    <!-- 第三块：下一个（已作答时） -->
+    <section class="review-actions next-row hidden" id="nextActions">
+      <button class="act-btn act-next" id="nextBtn">下一个</button>
+    </section>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="./sql-wasm.js"></script>
+  <script src="js/db.js"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    // 模式来源优先级：URL 参数 > sessionStorage > 默认中文→英文
+    function resolveMode() {
+      let m = params.get('mode');
+      if (m !== 'en2zh' && m !== 'zh2en') {
+        try { m = sessionStorage.getItem('reviewMode'); } catch (e) { m = null; }
+      }
+      return (m === 'en2zh') ? 'en2zh' : 'zh2en';
+    }
+    const mode = resolveMode();
+
+    const qLabel = document.getElementById('qLabel');
+    const aLabel = document.getElementById('aLabel');
+    const qWord = document.getElementById("qWord");
+    const aWord = document.getElementById('aWord');
+    const modeTag = document.getElementById('modeTag');
+    const toastEl = document.getElementById('toast');
+
+    const answerCard = document.getElementById('answerCard');
+    const rateActions = document.getElementById('rateActions');
+    const nextActions = document.getElementById('nextActions');
+    const nextBtn = document.getElementById('nextBtn');
+
+    let current = null;   // 当前这条单词
+
+    // ===== 三块的状态切换 =====
+    // 提问状态：只有第一块 + 三个评价按钮
+    function showAskState() {
+      answerCard.classList.add('hidden');
+      rateActions.classList.remove('hidden');
+      nextActions.classList.add('hidden');
+    }
+
+    // 已作答状态：露出第二块 + 只留「下一个」
+    function showAnswerState() {
+      answerCard.classList.remove('hidden');
+      rateActions.classList.add('hidden');
+      nextActions.classList.remove('hidden');
+    }
+
+    // 按模式决定上下两块各显示什么
+    function applyMode() {
+      if (mode === 'zh2en') {
+        modeTag.textContent = '中文 → 英文';
+        qLabel.textContent = '中文';
+        aLabel.textContent = '英文';
+      } else {
+        modeTag.textContent = '英文 → 中文';
+        qLabel.textContent = '英文';
+        aLabel.textContent = '中文';
+      }
+    }
+
+    function showToast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      clearTimeout(showToast.timer);
+      showToast.timer = setTimeout(() => toastEl.classList.remove('show'), 1600);
+    }
+
+    // ===== 评价按钮：认识 +1、模糊不动、忘记归零，然后露出答案 =====
+    async function rate(kind) {
+      if (!current) {
+        showToast('先添加几条单词再复习吧');
+        return;
+      }
+      if (kind === 'know') {
+        AppDB.db.run('UPDATE vocab SET STUDY_TIME = IFNULL(STUDY_TIME,0) + 1 WHERE ID=?', [current.id]);
+      } else if (kind === 'forget') {
+        AppDB.db.run('UPDATE vocab SET STUDY_TIME = 0 WHERE ID=?', [current.id]);
+      }
+      // 模糊：不改数据库
+
+      try {
+        if (kind !== 'vague') await AppDB.persist();
+      } catch (e) {
+        console.error(e);
+        showToast('保存失败：' + e.message);
+      }
+      showAnswerState();
+    }
+
+    document.querySelectorAll('[data-rate]').forEach(btn => {
+      btn.addEventListener('click', () => rate(btn.dataset.rate));
+    });
+
+    // ===== 下一个：回到提问状态，重新按 STUDY_TIME 倒序取一条 =====
+    nextBtn.addEventListener('click', () => {
+      showAskState();
+      loadOne();
+    });
+
+    // 从数据库取一条，按 STUDY_TIME 倒序
+    function loadOne() {
+      const res = AppDB.db.exec(
+        'SELECT ID, ENG, CHI, STUDY_TIME FROM vocab ORDER BY STUDY_TIME ASC, ID ASC LIMIT 1'
+      );
+      if (!res[0] || !res[0].values.length) {
+        current = null;
+        qWord.textContent = '还没有单词';
+        aWord.textContent = '去「我的单词书」添加吧';
+        return;
+      }
+      const [id, eng, chi, studyTime] = res[0].values[0];
+      current = { id, eng, chi, studyTime };
+
+      if (mode === 'zh2en') {
+        qWord.textContent = chi || '（空）';
+        aWord.textContent = eng || '（空）';
+      } else {
+        qWord.textContent = eng || '（空）';
+        aWord.textContent = chi || '（空）';
+      }
+    }
+
+    (async function init() {
+      applyMode();
+      showAskState();
+      try {
+        await AppDB.init();
+        loadOne();
+      } catch (e) {
+        qWord.textContent = '初始化失败';
+        aWord.textContent = e.message;
+        console.error(e);
+      }
+    })();
+  </script>
+</body>
+</html>
